@@ -149,26 +149,6 @@ streamlit run app.py
 
 The application will open automatically in your browser.
 
----
-
-## Batch Mode Output
-
-Batch mode generates:
-
-```csv
-filename,prediction
-```
-
-Example:
-
-```csv
-filename,prediction
-clip1.mp3,Hey Jude
-clip2.mp3,Eleanor Rigby
-clip3.mp3,Blackbird
-```
-
----
 
 ## Experimental Observations
 
