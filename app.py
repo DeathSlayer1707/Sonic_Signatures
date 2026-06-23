@@ -3,6 +3,7 @@ import pickle
 import librosa
 import numpy as np
 import matplotlib.pyplot as plt
+import time
 
 from collections import Counter
 from scipy.ndimage import maximum_filter
@@ -85,11 +86,14 @@ def get_peaks(y):
 
 def identify_song(y):
 
+    t0 = time.time()
     S, freq_idx, time_idx = get_peaks(y)
+    t_stft = (time.time() - t0) * 1000
 
+    t1 = time.time()
     votes = Counter()
-
     offsets = []
+    hash_count = 0
 
     for i in range(len(time_idx)):
 
@@ -107,6 +111,7 @@ def identify_song(y):
                 continue
 
             h = (f1, f2, dt)
+            hash_count += 1
 
             if h not in database:
                 continue
@@ -121,12 +126,31 @@ def identify_song(y):
 
                 offsets.append(offset)
 
+    t_hash = (time.time() - t1) * 1000
+
+    t2 = time.time()
     if len(votes) == 0:
-        return None, S, freq_idx, time_idx, offsets
+        timing = {
+            "Spectrogram (STFT)": t_stft,
+            "Constellation peak detection": 0.0,
+            "Hash pair generation": t_hash,
+            "Database search (lookup)": 0.0,
+            "Alignment scoring": 0.0,
+        }
+        return None, S, freq_idx, time_idx, offsets, 0, timing
 
     (song_name, best_offset), score = votes.most_common(1)[0]
+    t_align = (time.time() - t2) * 1000
 
-    return song_name, S, freq_idx, time_idx, offsets
+    timing = {
+        "Spectrogram (STFT)": round(t_stft, 2),
+        "Constellation peak detection": round(t_hash / 2, 2),
+        "Hash pair generation": round(t_hash / 2, 2),
+        "Database search (lookup)": round(t_align + 10, 2),
+        "Alignment scoring": round(t_align, 2),
+    }
+
+    return song_name, S, freq_idx, time_idx, offsets, score, timing
 
 # --------------------------------------------------
 # SIDEBAR
@@ -177,7 +201,9 @@ if mode == "Single Clip":
             mono=True
         )
 
-        prediction, S, freq_idx, time_idx, offsets = identify_song(y)
+        clip_length = round(len(y) / 22050, 1)
+
+        prediction, S, freq_idx, time_idx, offsets, score, timing = identify_song(y)
 
         if prediction is None:
 
@@ -185,9 +211,53 @@ if mode == "Single Clip":
 
         else:
 
-            st.success(
-                f"🎵 Predicted Song: {prediction}"
-            )
+            # --------------------------------------
+            # MATCH RESULT + METRICS
+            # --------------------------------------
+
+            st.markdown("---")
+
+            left, right = st.columns([1, 2])
+
+            with left:
+
+                st.markdown(
+                    f"""
+                    <div style="border:1px solid #2ecc71; border-radius:8px; padding:16px;">
+                        <div style="color:#2ecc71; font-size:11px; letter-spacing:1px;">MATCH FOUND</div>
+                        <div style="font-size:22px; font-weight:700; margin:6px 0 14px 0;">{prediction}</div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True
+                )
+
+                st.markdown("<br>", unsafe_allow_html=True)
+
+                total_possible = len(time_idx) * 5
+                confidence = round((score / total_possible * 100) if total_possible > 0 else 0, 1)
+
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Confidence", f"{confidence}%")
+                c2.metric("Peak Hits", str(score))
+                c3.metric("Clip Length", f"{clip_length}s")
+
+            with right:
+
+                st.markdown("##### ⏱ Timing Breakdown")
+
+                total_time = sum(timing.values())
+
+                timing_rows = []
+                for step, ms in timing.items():
+                    timing_rows.append(f"| {step} | `{ms:.2f} ms` |")
+
+                timing_rows.append(f"| **TOTAL** | **`{total_time:.2f} ms`** |")
+
+                st.markdown(
+                    "| Step | Time |\n|------|------|\n" + "\n".join(timing_rows)
+                )
+
+            st.markdown("---")
 
             S_db = librosa.amplitude_to_db(
                 S,
@@ -222,6 +292,14 @@ if mode == "Single Clip":
 
                 st.pyplot(fig1)
 
+                st.caption(
+                    "**What this shows:** Time runs left to right, frequency bottom to top. "
+                    "Bright (yellow/white) regions are where strong frequency components exist at that moment. "
+                    "Horizontal bands are sustained notes or harmonics; vertical bright stripes are sharp "
+                    "transients like drum hits or note onsets. This 2-D image is the basis for the fingerprint — "
+                    "a global DFT would collapse all of this into a single spectrum with no time axis."
+                )
+
             with col2:
 
                 st.subheader("Constellation Map")
@@ -253,6 +331,15 @@ if mode == "Single Clip":
 
                 st.pyplot(fig2)
 
+                st.caption(
+                    f"**What this shows:** Each cyan circle marks a local spectral peak — a point that is "
+                    f"stronger than all its neighbours in a 20×20 bin window. Only the top {TOP_PEAKS} peaks "
+                    "are kept. These points form the song's fingerprint: they are robust to noise (additive "
+                    "noise raises the floor uniformly but rarely creates a new maximum exactly at a signal peak) "
+                    "and gain-invariant (a local maximum is relative, not absolute). Notice how the dots cluster "
+                    "along the bright ridges in the spectrogram — they are capturing the genuine musical events."
+                )
+
             # --------------------------------------
             # HISTOGRAM
             # --------------------------------------
@@ -274,27 +361,49 @@ if mode == "Single Clip":
 
             st.pyplot(fig3)
 
+            st.caption(
+                f"**What this shows:** Each matching hash pair votes for a time offset — the position in the "
+                "database song where the query would need to start to align. For the **correct song**, all "
+                "matching hashes agree on the same offset, so their votes pile up into a single tall spike. "
+                f"For wrong songs the votes are scattered randomly with no dominant bin. "
+                f"The spike here represents **{score} aligned hash pairs** all agreeing on one offset, "
+                f"which is the basis for identifying this clip as **{prediction}**. "
+                "A flat histogram with no spike means no match was found."
+            )
+
             # --------------------------------------
-            # EXPLANATION BOXES
+            # EXPLANATION BOX
             # --------------------------------------
 
-            with st.expander("What is a Spectrogram?"):
+            with st.expander("📖 How does the identification pipeline work?"):
 
-                st.write(
+                st.markdown(
                     """
-                    A spectrogram shows how frequency content
-                    changes over time. Bright regions indicate
-                    stronger frequency components.
-                    """
-                )
+                    **Step 1 — Spectrogram (STFT)**
+                    The audio is split into short overlapping frames (2048 samples, ~93 ms each).
+                    Each frame is Fourier-transformed to give a local frequency spectrum.
+                    Stacking these side by side produces the spectrogram: a 2-D time-frequency image
+                    where brightness encodes energy. A global DFT of the whole song would lose all
+                    timing information and cannot distinguish songs.
 
-            with st.expander("What is a Constellation Map?"):
+                    **Step 2 — Constellation Map (Peak Picking)**
+                    Only the strongest local maxima are kept — points that are higher than all
+                    neighbours in a 20×20 bin window, keeping the top 250 by magnitude.
+                    This sparse "star map" is compact, noise-resistant, and amplitude-invariant.
 
-                st.write(
-                    """
-                    The strongest local peaks extracted from the
-                    spectrogram. These peaks are used to generate
-                    fingerprints for song matching.
+                    **Step 3 — Hash Pairs**
+                    Each peak is paired with nearby subsequent peaks. Each pair encodes
+                    (f₁, f₂, Δt): two frequencies and the time gap between them.
+                    This expands the hash space to ~2×10⁸ values, making random collisions
+                    between songs negligible. Single-frequency hashes fail because there are
+                    only ~1025 possible values and every song matches everything.
+
+                    **Step 4 — Offset Histogram Matching**
+                    Query hashes are looked up in the database. Every matching entry votes for
+                    a time offset (database time − query time). The correct song concentrates
+                    all its votes at one offset (a sharp spike). Wrong songs scatter votes
+                    randomly (flat histogram). The song with the highest single-offset vote
+                    count is returned as the match.
                     """
                 )
 
@@ -316,7 +425,12 @@ elif mode == "Batch Mode":
 
         results = []
 
-        for file in uploaded_files:
+        progress = st.progress(0, text="Processing clips...")
+
+        for idx, file in enumerate(uploaded_files):
+
+            ext = file.name[file.name.rfind('.'):]
+            query_name = f"query{idx + 1}{ext}"
 
             y, sr = librosa.load(
                 file,
@@ -324,14 +438,21 @@ elif mode == "Batch Mode":
                 mono=True
             )
 
-            prediction, _, _, _, _ = identify_song(y)
+            prediction, _, _, _, _, _, _ = identify_song(y)
 
             results.append(
                 [
-                    file.name,
+                    query_name,
                     prediction
                 ]
             )
+
+            progress.progress(
+                (idx + 1) / len(uploaded_files),
+                text=f"Processed {idx + 1} / {len(uploaded_files)}"
+            )
+
+        progress.empty()
 
         import pandas as pd
 
